@@ -1,9 +1,12 @@
 use crate::use_controlled;
-use dioxus::html::geometry::{ClientPoint, ElementPoint};
+use dioxus::html::geometry::euclid::Vector2D;
+use dioxus::html::geometry::{ClientPoint, ClientSpace, ElementPoint};
 use dioxus_lib::html::geometry::Pixels;
 use dioxus_lib::html::geometry::euclid::Rect;
 use dioxus_lib::prelude::*;
+use std::cell::RefCell;
 use std::ops::RangeInclusive;
+use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SliderValue {
@@ -19,6 +22,39 @@ impl std::fmt::Display for SliderValue {
         }
     }
 }
+
+static MOUSE_POSITION: Global<ReadOnlySignal<ClientPoint>> = Global::new(|| {
+    let mut signal = Signal::new_in_scope(ClientPoint::default(), ScopeId::ROOT);
+    let runtime = Runtime::current().unwrap();
+    queue_effect(move || {
+        runtime.spawn(ScopeId::ROOT, async move {
+            let mut mouse_updates = dioxus::document::eval(
+                "window.addEventListener('mousemove', (e) => {
+                    dioxus.send([e.clientX, e.clientY]);
+                });",
+            );
+            while let Ok([x, y]) = mouse_updates.recv::<[f64; 2]>().await {
+                signal.set(ClientPoint::new(x, y));
+            }
+        });
+    });
+    signal.into()
+});
+
+static MOUSE_DELTA: GlobalMemo<Vector2D<f64, ClientSpace>> = Global::new(|| {
+    static LAST_MOUSE_POSITION: Global<Rc<RefCell<Option<ClientPoint>>>> =
+        Global::new(|| Rc::new(RefCell::new(None)));
+    let last_position_resolved = LAST_MOUSE_POSITION.resolve();
+    let mut last_position_mut = last_position_resolved.borrow_mut();
+
+    let new_position = MOUSE_POSITION.resolve().cloned();
+    let last_position = last_position_mut.clone();
+    *last_position_mut = Some(new_position.clone());
+    match last_position {
+        Some(pos) => new_position - pos,
+        None => Default::default(),
+    }
+});
 
 #[derive(Props, Clone, PartialEq)]
 pub struct SliderProps {
@@ -93,8 +129,7 @@ pub fn Slider(props: SliderProps) -> Element {
 
     let mut rect = use_signal(|| None);
     let mut div_element = use_signal(|| None);
-    let mut last_mouse_position: Signal<Option<ClientPoint>> = use_signal(|| None);
-    let mut granular_value = use_signal(|| props.default_value.clone());
+    let mut granular_value = use_hook(|| CopyValue::new(props.default_value.clone()));
 
     let size = rect().map(|r: Rect<f64, Pixels>| {
         if props.horizontal {
@@ -104,29 +139,22 @@ pub fn Slider(props: SliderProps) -> Element {
         }
     });
 
-    let mut update_position = move |e: &Event<MouseData>| {
+    use_effect(move || {
+        if !dragging() {
+            return;
+        }
+
         let Some(size) = size else {
             tracing::warn!("Slider size is not (yet) set");
             return;
         };
-        let client_coordinates = e.data().client_coordinates();
-
-        let Some(current_last_mouse_position) = last_mouse_position() else {
-            return;
-        };
-        tracing::info!("Mouse moved: {:?}", e.data().client_coordinates());
-        tracing::info!(
-            "Current last mouse position: {:?}",
-            current_last_mouse_position
-        );
-        tracing::info!("Slider size: {}", size);
-        let delta = client_coordinates - current_last_mouse_position;
+        let delta = MOUSE_DELTA();
 
         let delta_pos = if ctx.horizontal { delta.x } else { delta.y } as f64;
 
         let delta = delta_pos / size as f64 * ctx.range_size();
 
-        let current_value = match granular_value() {
+        let current_value = match granular_value.cloned() {
             SliderValue::Single(v) => v,
             SliderValue::Range(start, _) => {
                 // TODO: Handle range sliders
@@ -137,7 +165,7 @@ pub fn Slider(props: SliderProps) -> Element {
         granular_value.set(SliderValue::Single(new));
         let stepped = ((new) / ctx.step).round() * ctx.step;
         ctx.set_value.call(SliderValue::Single(stepped));
-    };
+    });
 
     rsx! {
         div {
@@ -167,9 +195,6 @@ pub fn Slider(props: SliderProps) -> Element {
                 if !dragging() || (ctx.disabled)() {
                     return;
                 }
-
-                update_position(&e);
-                last_mouse_position.set(Some(e.data().client_coordinates()));
             },
 
             onmousedown: move |e| {
@@ -178,13 +203,10 @@ pub fn Slider(props: SliderProps) -> Element {
                 }
 
                 dragging.set(true);
-                update_position(&e);
-                last_mouse_position.set(Some(e.data().client_coordinates()));
             },
 
             onmouseup: move |_| {
                 dragging.set(false);
-                last_mouse_position.take();
             },
             ..props.attributes,
 
