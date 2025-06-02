@@ -23,6 +23,37 @@ impl std::fmt::Display for SliderValue {
     }
 }
 
+static MOUSE_DOWN: Global<ReadOnlySignal<bool>> = Global::new(|| {
+    let mut signal = Signal::new_in_scope(false, ScopeId::ROOT);
+    let runtime = Runtime::current().unwrap();
+    queue_effect(move || {
+        tracing::info!("Setting up mouse down/up event listeners");
+        runtime.spawn(ScopeId::ROOT, async move {
+            let mut mouse_updates = dioxus::document::eval(
+                "window.addEventListener('mousedown', (e) => {
+                    dioxus.send(true);
+                });",
+            );
+            while let Ok(_) = mouse_updates.recv::<bool>().await {
+                tracing::info!("Mouse down event received");
+                signal.set(true);
+            }
+        });
+        runtime.spawn(ScopeId::ROOT, async move {
+            let mut mouse_updates = dioxus::document::eval(
+                "window.addEventListener('mouseup', (e) => {
+                    dioxus.send(false);
+                });",
+            );
+            while let Ok(_) = mouse_updates.recv::<bool>().await {
+                tracing::info!("Mouse up event received");
+                signal.set(false);
+            }
+        });
+    });
+    signal.into()
+});
+
 static MOUSE_POSITION: Global<ReadOnlySignal<ClientPoint>> = Global::new(|| {
     let mut signal = Signal::new_in_scope(ClientPoint::default(), ScopeId::ROOT);
     let runtime = Runtime::current().unwrap();
@@ -114,6 +145,7 @@ pub fn Slider(props: SliderProps) -> Element {
     };
 
     let mut dragging = use_signal(|| false);
+    let mut slider_thumb = use_signal(|| None);
 
     let ctx = use_context_provider(|| SliderContext {
         value,
@@ -125,6 +157,7 @@ pub fn Slider(props: SliderProps) -> Element {
         horizontal: props.horizontal,
         inverted: props.inverted,
         dragging: dragging.into(),
+        slider_thumb,
     });
 
     let mut rect = use_signal(|| None);
@@ -162,10 +195,21 @@ pub fn Slider(props: SliderProps) -> Element {
             }
         };
         let new = current_value + delta;
-        let new = new.clamp(ctx.min, ctx.max);
         granular_value.set(SliderValue::Single(new));
-        let stepped = ((new) / ctx.step).round() * ctx.step;
+        let clamped = new.clamp(ctx.min, ctx.max);
+        let stepped = (clamped / ctx.step).round() * ctx.step;
         ctx.set_value.call(SliderValue::Single(stepped));
+    });
+
+    use_effect(move || {
+        let mouse_down = MOUSE_DOWN.resolve().cloned();
+        if !*dragging.peek() {
+            return;
+        }
+
+        if !mouse_down {
+            dragging.set(false);
+        }
     });
 
     rsx! {
@@ -192,23 +236,50 @@ pub fn Slider(props: SliderProps) -> Element {
                     rect.set(Some(r));
                 }
             },
-            onmousemove: move |e| {
-                if !dragging() || (ctx.disabled)() {
-                    return;
-                }
-            },
 
-            onmousedown: move |e| {
+            onmousedown: move |evt| async move {
                 if (ctx.disabled)() {
                     return;
                 }
+                let Some(div_element) = div_element() else {
+                    tracing::warn!("Slider div element is not (yet) set");
+                    return;
+                };
+
+                // Update the bounding rect of the slider in case it moved
+                if let Ok(r) = div_element.get_client_rect().await {
+                    rect.set(Some(r));
+
+                    let size = if props.horizontal {
+                        r.width()
+                    } else {
+                        r.height()
+                    };
+
+                    // Get the mouse position relative to the slider
+                    let top_left = r.origin;
+                    let mouse_pos = evt.data().client_coordinates();
+                    let relative_pos = mouse_pos - top_left.cast_unit();
+
+                    let offset = if ctx.horizontal {
+                        relative_pos.x
+                    } else {
+                        relative_pos.y
+                    };
+                    let new = (offset / size) * ctx.range_size() + ctx.min;
+                    granular_value.set(SliderValue::Single(new));
+                    let stepped = ((new) / ctx.step).round() * ctx.step;
+                    ctx.set_value.call(SliderValue::Single(stepped));
+                }
 
                 dragging.set(true);
+
+                // Focus the slider to allow keyboard navigation
+                if let Some(slider_thumb) = slider_thumb() {
+                    slider_thumb.set_focus(true);
+                }
             },
 
-            onmouseup: move |_| {
-                dragging.set(false);
-            },
             ..props.attributes,
 
             {props.children}
@@ -295,7 +366,7 @@ pub struct SliderThumbProps {
 
 #[component]
 pub fn SliderThumb(props: SliderThumbProps) -> Element {
-    let ctx = use_context::<SliderContext>();
+    let mut ctx = use_context::<SliderContext>();
     let orientation = if ctx.horizontal {
         "horizontal"
     } else {
@@ -329,6 +400,40 @@ pub fn SliderThumb(props: SliderThumbProps) -> Element {
             "data-dragging": ctx.dragging,
             style,
             tabindex: 0,
+            onmounted: move |evt| async move {
+                // Store the mounted data for focus management
+                ctx.slider_thumb.set(Some(evt.data()));
+            },
+            onkeydown: move |evt| async move {
+                if (ctx.disabled)() {
+                    return;
+                }
+
+                let key = evt.data().key();
+                let mut step = ctx.step;
+                if evt.data().modifiers().shift() {
+                    // If shift is pressed, increase the step size
+                    step *= 10.0;
+                }
+
+                // Handle keyboard navigation
+                let mut new_value = match key {
+                    Key::ArrowUp | Key::ArrowRight => {
+                        value() + step
+                    }
+                    Key::ArrowDown | Key::ArrowLeft => {
+                        value() - step
+                    }
+                    _ => return,
+                };
+
+                // Clamp the new value to the range
+                new_value = new_value.clamp(ctx.min, ctx.max);
+                let stepped_value = (new_value / ctx.step).round() * ctx.step;
+
+                // Update the value
+                ctx.set_value.call(SliderValue::Single(stepped_value));
+            },
             ..props.attributes,
         }
     }
@@ -357,6 +462,7 @@ struct SliderContext {
     horizontal: bool,
     inverted: bool,
     dragging: ReadOnlySignal<bool>,
+    slider_thumb: Signal<Option<Rc<MountedData>>>,
 }
 
 impl SliderContext {
