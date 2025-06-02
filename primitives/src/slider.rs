@@ -1,4 +1,5 @@
 use crate::use_controlled;
+use dioxus::html::geometry::{ClientPoint, ElementPoint};
 use dioxus_lib::html::geometry::Pixels;
 use dioxus_lib::html::geometry::euclid::Rect;
 use dioxus_lib::prelude::*;
@@ -94,6 +95,50 @@ pub fn Slider(props: SliderProps) -> Element {
 
     let mut rect = use_signal(|| None);
     let mut div_element = use_signal(|| None);
+    let mut last_mouse_position: Signal<Option<ClientPoint>> = use_signal(|| None);
+    let mut granular_value = use_signal(|| {
+        props.default_value.clone()
+    });
+
+    let size = rect().map(|r: Rect<f64, Pixels>| {
+        if props.horizontal {
+            r.width()
+        } else {
+            r.height()
+        }
+    });
+
+    let mut update_position = move |e: &Event<MouseData>| {
+        let Some(size) = size else {
+            tracing::warn!("Slider size is not (yet) set");
+            return;
+        };
+        let client_coordinates = e.data().client_coordinates();
+
+        let Some(current_last_mouse_position) = last_mouse_position() else {
+            return;
+        };
+        let delta = client_coordinates - current_last_mouse_position;
+
+        let delta_pos = if ctx.horizontal {
+            delta.x
+        } else {
+            delta.y
+        } as f64;
+
+        let delta = get_value_from_pointer(delta_pos, size, ctx.min, ctx.max, ctx.inverted);
+
+        let current_value = match granular_value() {
+            SliderValue::Single(v) => v,
+            SliderValue::Range(start, _) => {
+                // TODO: Handle range sliders
+                start
+            }
+        };
+        let stepped = ((current_value + delta) / ctx.step).round() * ctx.step;
+        ctx.set_value.call(SliderValue::Single(stepped));
+        granular_value.set(SliderValue::Single(stepped));
+    };
 
     rsx! {
         div {
@@ -115,6 +160,7 @@ pub fn Slider(props: SliderProps) -> Element {
                     return;
                 };
                 if let Ok(r) = div_element.get_client_rect().await {
+                    tracing::info!("Slider resized: {:?}", r);
                     rect.set(Some(r));
                 }
             },
@@ -122,59 +168,24 @@ pub fn Slider(props: SliderProps) -> Element {
                 if !dragging() || (ctx.disabled)() {
                     return;
                 }
-                let Some(rect) = rect() else {
-                    tracing::warn!("Slider rect is not (yet) set");
-                    return;
-                };
 
-                let current_pos = if ctx.horizontal {
-                    e.data().client_coordinates().x
-                } else {
-                    e.data().client_coordinates().y
-                } as f64;
-
-                let new_value = get_value_from_pointer(
-                    current_pos,
-                    &rect,
-                    ctx.min,
-                    ctx.max,
-                    ctx.inverted,
-                );
-
-                let stepped = (new_value / ctx.step).round() * ctx.step;
-                ctx.set_value.call(SliderValue::Single(stepped));
+                update_position(&e);
+                last_mouse_position.set(Some(e.data().client_coordinates()));
             },
 
             onmousedown: move |e| {
                 if (ctx.disabled)() {
                     return;
                 }
-                let Some(rect) = rect() else {
-                    tracing::warn!("Slider rect is not (yet) set");
-                    return;
-                };
-
 
                 dragging.set(true);
-                let current_pos = if ctx.horizontal {
-                    e.data().client_coordinates().x
-                } else {
-                    e.data().client_coordinates().y
-                } as f64;
-
-                let new_value = get_value_from_pointer(
-                    current_pos,
-                    &rect,
-                    ctx.min,
-                    ctx.max,
-                    ctx.inverted,
-                );
-
-                let stepped = (new_value / ctx.step).round() * ctx.step;
-                ctx.set_value.call(SliderValue::Single(stepped));
+                update_position(&e);
             },
 
-            onmouseup: move |_| dragging.set(false),
+            onmouseup: move |_| {
+                dragging.set(false);
+                last_mouse_position.take();
+            },
             ..props.attributes,
 
             {props.children}
@@ -328,7 +339,7 @@ fn linear_scale(input: [f64; 2], output: [f64; 2]) -> impl Fn(f64) -> f64 {
 /// # Arguments
 ///
 /// * `pointer_position` - The position of the pointer
-/// * `rect` - The rectangle reference area
+/// * `size` - The rectangle width (or height for vertical sliders)
 /// * `min` - The minimum value in the output range
 /// * `max` - The maximum value in the output range
 /// * `inverted` - Whether to invert the output range
@@ -338,16 +349,16 @@ fn linear_scale(input: [f64; 2], output: [f64; 2]) -> impl Fn(f64) -> f64 {
 /// The calculated value within the range
 fn get_value_from_pointer(
     pointer_position: f64,
-    rect: &Rect<f64, Pixels>,
+    size: f64,
     min: f64,
     max: f64,
     inverted: bool,
 ) -> f64 {
-    let input = [0.0, rect.width()];
+    let input = [0.0, size];
     let output = if !inverted { [min, max] } else { [max, min] };
     let value = linear_scale(input, output);
 
-    value(pointer_position - rect.origin.x)
+    value(pointer_position)
 }
 
 #[allow(dead_code)]
