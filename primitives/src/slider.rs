@@ -162,6 +162,7 @@ pub fn Slider(props: SliderProps) -> Element {
             }
         };
         let new = current_value + delta;
+        let new = new.clamp(ctx.min, ctx.max);
         granular_value.set(SliderValue::Single(new));
         let stepped = ((new) / ctx.step).round() * ctx.step;
         ctx.set_value.call(SliderValue::Single(stepped));
