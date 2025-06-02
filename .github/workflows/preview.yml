@@ -46,7 +46,7 @@ jobs:
       - name: Build
         run: cd preview && dx build --platform web
       - name: Copy output
-        run: cp -r target/dx/preview/release/web/public docs
+        run: cp -r target/dx/preview/debug/web/public docs
       - name: Add gh pages 404
         run: |
             echo "<!DOCTYPE html>
