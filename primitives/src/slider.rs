@@ -76,7 +76,6 @@ pub fn Slider(props: SliderProps) -> Element {
     } else {
         "vertical"
     };
-    let range = props.min..=props.max;
 
     let mut dragging = use_signal(|| false);
 
@@ -89,16 +88,13 @@ pub fn Slider(props: SliderProps) -> Element {
         disabled: props.disabled,
         horizontal: props.horizontal,
         inverted: props.inverted,
-        range,
         dragging: dragging.into(),
     });
 
     let mut rect = use_signal(|| None);
     let mut div_element = use_signal(|| None);
     let mut last_mouse_position: Signal<Option<ClientPoint>> = use_signal(|| None);
-    let mut granular_value = use_signal(|| {
-        props.default_value.clone()
-    });
+    let mut granular_value = use_signal(|| props.default_value.clone());
 
     let size = rect().map(|r: Rect<f64, Pixels>| {
         if props.horizontal {
@@ -118,15 +114,17 @@ pub fn Slider(props: SliderProps) -> Element {
         let Some(current_last_mouse_position) = last_mouse_position() else {
             return;
         };
+        tracing::info!("Mouse moved: {:?}", e.data().client_coordinates());
+        tracing::info!(
+            "Current last mouse position: {:?}",
+            current_last_mouse_position
+        );
+        tracing::info!("Slider size: {}", size);
         let delta = client_coordinates - current_last_mouse_position;
 
-        let delta_pos = if ctx.horizontal {
-            delta.x
-        } else {
-            delta.y
-        } as f64;
+        let delta_pos = if ctx.horizontal { delta.x } else { delta.y } as f64;
 
-        let delta = get_value_from_pointer(delta_pos, size, ctx.min, ctx.max, ctx.inverted);
+        let delta = delta_pos / size as f64 * ctx.range_size();
 
         let current_value = match granular_value() {
             SliderValue::Single(v) => v,
@@ -135,9 +133,10 @@ pub fn Slider(props: SliderProps) -> Element {
                 start
             }
         };
-        let stepped = ((current_value + delta) / ctx.step).round() * ctx.step;
+        let new = current_value + delta;
+        granular_value.set(SliderValue::Single(new));
+        let stepped = ((new) / ctx.step).round() * ctx.step;
         ctx.set_value.call(SliderValue::Single(stepped));
-        granular_value.set(SliderValue::Single(stepped));
     };
 
     rsx! {
@@ -180,6 +179,7 @@ pub fn Slider(props: SliderProps) -> Element {
 
                 dragging.set(true);
                 update_position(&e);
+                last_mouse_position.set(Some(e.data().client_coordinates()));
             },
 
             onmouseup: move |_| {
@@ -311,58 +311,19 @@ pub fn SliderThumb(props: SliderThumbProps) -> Element {
     }
 }
 
-/// Performs a linear scale transformation between two ranges.
-///
-/// # Arguments
-///
-/// * `input` - Input range [min, max]
-/// * `output` - Output range [min, max]
-///
-/// # Returns
-///
-/// A function that maps values from the input range to the output range
-fn linear_scale(input: [f64; 2], output: [f64; 2]) -> impl Fn(f64) -> f64 {
-    let [in_min, in_max] = input;
-    let [out_min, out_max] = output;
+/// Scale the input value which must be somewhere within the range into
+/// a number between 0 and 1
+fn normalize(range: [f64; 2]) -> impl Fn(f64) -> f64 {
+    let [in_min, in_max] = range;
 
     move |x: f64| {
         // Calculate position in input range (0.0 ~ 1.0)
-        let normalized = (x - in_min) / (in_max - in_min);
-
-        // Convert to output range
-        out_min + normalized * (out_max - out_min)
+        (x - in_min) / (in_max - in_min)
     }
 }
 
-/// Calculates a value based on pointer position within a rectangle.
-///
-/// # Arguments
-///
-/// * `pointer_position` - The position of the pointer
-/// * `size` - The rectangle width (or height for vertical sliders)
-/// * `min` - The minimum value in the output range
-/// * `max` - The maximum value in the output range
-/// * `inverted` - Whether to invert the output range
-///
-/// # Returns
-///
-/// The calculated value within the range
-fn get_value_from_pointer(
-    pointer_position: f64,
-    size: f64,
-    min: f64,
-    max: f64,
-    inverted: bool,
-) -> f64 {
-    let input = [0.0, size];
-    let output = if !inverted { [min, max] } else { [max, min] };
-    let value = linear_scale(input, output);
-
-    value(pointer_position)
-}
-
 #[allow(dead_code)]
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 struct SliderContext {
     value: Memo<SliderValue>,
     set_value: Callback<SliderValue>,
@@ -372,6 +333,24 @@ struct SliderContext {
     disabled: ReadOnlySignal<bool>,
     horizontal: bool,
     inverted: bool,
-    range: RangeInclusive<f64>,
     dragging: ReadOnlySignal<bool>,
+}
+
+impl SliderContext {
+    fn range(&self) -> [f64; 2] {
+        if !self.inverted {
+            [self.min, self.max]
+        } else {
+            [self.max, self.min]
+        }
+    }
+
+    fn range_size(&self) -> f64 {
+        let [range_min, range_max] = self.range();
+        range_max - range_min
+    }
+
+    fn range_inclusive(&self) -> RangeInclusive<f64> {
+        self.min..=self.max
+    }
 }
