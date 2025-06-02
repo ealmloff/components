@@ -27,7 +27,6 @@ static MOUSE_DOWN: Global<ReadOnlySignal<bool>> = Global::new(|| {
     let mut signal = Signal::new_in_scope(false, ScopeId::ROOT);
     let runtime = Runtime::current().unwrap();
     queue_effect(move || {
-        tracing::info!("Setting up mouse down/up event listeners");
         runtime.spawn(ScopeId::ROOT, async move {
             let mut mouse_updates = dioxus::document::eval(
                 "window.addEventListener('mousedown', (e) => {
@@ -35,7 +34,6 @@ static MOUSE_DOWN: Global<ReadOnlySignal<bool>> = Global::new(|| {
                 });",
             );
             while let Ok(_) = mouse_updates.recv::<bool>().await {
-                tracing::info!("Mouse down event received");
                 signal.set(true);
             }
         });
@@ -46,7 +44,6 @@ static MOUSE_DOWN: Global<ReadOnlySignal<bool>> = Global::new(|| {
                 });",
             );
             while let Ok(_) = mouse_updates.recv::<bool>().await {
-                tracing::info!("Mouse up event received");
                 signal.set(false);
             }
         });
@@ -54,8 +51,8 @@ static MOUSE_DOWN: Global<ReadOnlySignal<bool>> = Global::new(|| {
     signal.into()
 });
 
-static MOUSE_POSITION: Global<ReadOnlySignal<ClientPoint>> = Global::new(|| {
-    let mut signal = Signal::new_in_scope(ClientPoint::default(), ScopeId::ROOT);
+static MOUSE_POSITION: Global<ReadOnlySignal<Option<ClientPoint>>> = Global::new(|| {
+    let mut signal = Signal::new_in_scope(None, ScopeId::ROOT);
     let runtime = Runtime::current().unwrap();
     queue_effect(move || {
         runtime.spawn(ScopeId::ROOT, async move {
@@ -65,7 +62,7 @@ static MOUSE_POSITION: Global<ReadOnlySignal<ClientPoint>> = Global::new(|| {
                 });",
             );
             while let Ok([x, y]) = mouse_updates.recv::<[f64; 2]>().await {
-                signal.set(ClientPoint::new(x, y));
+                signal.set(Some(ClientPoint::new(x, y)));
             }
         });
     });
@@ -78,13 +75,15 @@ static MOUSE_DELTA: GlobalMemo<Vector2D<f64, ClientSpace>> = Global::new(|| {
     let last_position_resolved = LAST_MOUSE_POSITION.resolve();
     let mut last_position_mut = last_position_resolved.borrow_mut();
 
-    let new_position = MOUSE_POSITION.resolve().cloned();
+    let Some(new_position) = MOUSE_POSITION.resolve().cloned() else {
+        return Default::default();
+    };
     let last_position = last_position_mut.clone();
     *last_position_mut = Some(new_position.clone());
-    match last_position {
-        Some(pos) => new_position - pos,
-        None => Default::default(),
-    }
+    let Some(last_position) = last_position else {
+        return Default::default();
+    };
+    new_position - last_position.cast_unit()
 });
 
 #[derive(Props, Clone, PartialEq)]
@@ -145,7 +144,6 @@ pub fn Slider(props: SliderProps) -> Element {
     };
 
     let mut dragging = use_signal(|| false);
-    let mut slider_thumb = use_signal(|| None);
 
     let ctx = use_context_provider(|| SliderContext {
         value,
@@ -157,7 +155,6 @@ pub fn Slider(props: SliderProps) -> Element {
         horizontal: props.horizontal,
         inverted: props.inverted,
         dragging: dragging.into(),
-        slider_thumb,
     });
 
     let mut rect = use_signal(|| None);
@@ -232,7 +229,6 @@ pub fn Slider(props: SliderProps) -> Element {
                     return;
                 };
                 if let Ok(r) = div_element.get_client_rect().await {
-                    tracing::info!("Slider resized: {:?}", r);
                     rect.set(Some(r));
                 }
             },
@@ -268,16 +264,11 @@ pub fn Slider(props: SliderProps) -> Element {
                     };
                     let new = (offset / size) * ctx.range_size() + ctx.min;
                     granular_value.set(SliderValue::Single(new));
-                    let stepped = ((new) / ctx.step).round() * ctx.step;
+                    let stepped = (new / ctx.step).round() * ctx.step;
                     ctx.set_value.call(SliderValue::Single(stepped));
                 }
 
                 dragging.set(true);
-
-                // Focus the slider to allow keyboard navigation
-                if let Some(slider_thumb) = slider_thumb() {
-                    slider_thumb.set_focus(true);
-                }
             },
 
             ..props.attributes,
@@ -387,6 +378,18 @@ pub fn SliderThumb(props: SliderThumbProps) -> Element {
         format!("bottom: {}%", percent)
     };
 
+    let mut button_ref: Signal<Option<Rc<MountedData>>> = use_signal(|| None);
+
+    use_effect(move || {
+        let button_ref = button_ref();
+        if let Some(button) = button_ref {
+            // Focus the button while dragging
+            if !(ctx.disabled)() && (ctx.dragging)() {
+                button.set_focus(true);
+            }
+        }
+    });
+
     rsx! {
         button {
             r#type: "button",
@@ -400,9 +403,13 @@ pub fn SliderThumb(props: SliderThumbProps) -> Element {
             "data-dragging": ctx.dragging,
             style,
             tabindex: 0,
-            onmounted: move |evt| async move {
+            onmounted: move |evt| {
                 // Store the mounted data for focus management
-                ctx.slider_thumb.set(Some(evt.data()));
+                button_ref.set(Some(evt.data()));
+            },
+            onmousedown: move |evt| {
+                // Don't focus the button. The dragging state will handle focus
+                evt.prevent_default();
             },
             onkeydown: move |evt| async move {
                 if (ctx.disabled)() {
@@ -462,7 +469,6 @@ struct SliderContext {
     horizontal: bool,
     inverted: bool,
     dragging: ReadOnlySignal<bool>,
-    slider_thumb: Signal<Option<Rc<MountedData>>>,
 }
 
 impl SliderContext {
