@@ -64,9 +64,11 @@ jobs:
           clean: false
           single-commit: true
       - name: Comment PR
+        # Only run if the pr just opened
+        if: github.event.action == 'opened' || github.event.action == 'reopened' || github.event.action == 'ready_for_review'
         uses: thollander/actions-comment-pull-request@v3
         with:
-          comment-tag: "pr-preview"
           message: |
             Preview available at https://dioxuslabs.github.io/components/pr-preview/pr-${{ github.event.pull_request.number }}/
+          comment-tag: "pr-preview"
 
