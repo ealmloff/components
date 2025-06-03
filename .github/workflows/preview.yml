@@ -66,6 +66,7 @@ jobs:
       - name: Comment PR
         uses: thollander/actions-comment-pull-request@v2
         with:
+          comment_tag: "pr-preview"
           message: |
             Preview available at https://dioxuslabs.github.io/components/pr-preview/pr-${{ github.event.pull_request.number }}/
 
