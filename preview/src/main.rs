@@ -20,7 +20,7 @@ fn main() {
 #[component]
 fn App() -> Element {
     rsx! {
-        "empty"
+        "empty of contents"
     }
 }
 
