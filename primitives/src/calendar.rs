@@ -107,7 +107,7 @@ impl CalendarDate {
         if date.day + 7 > days_in_month {
             let day_of_the_week = date.day_of_the_week();
             date = date.next_month();
-            date.day = date.day_for_position(0, day_of_the_week)
+            date.day = date.day_for_position(0, day_of_the_week);
         } else {
             date.day += 7;
         }
@@ -379,9 +379,9 @@ pub fn Calendar(props: CalendarProps) -> Element {
                     let mut view_date = (ctx.view_date)();
                     if new_date.month != view_date.month {
                         view_date.month = new_date.month;
+                        view_date.year = new_date.year;
                         (ctx.set_view_date)(view_date);
                     }
-                    tracing::info!("Setting focused date to {}", new_date);
                     ctx.focused_date.set(Some(new_date));
                 };
                 match e.key() {
