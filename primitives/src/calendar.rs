@@ -52,7 +52,9 @@ impl CalendarDate {
     pub fn day_for_position(&self, week: u32, weekday: u32) -> u32 {
         // The day should be the same week and day of the week as the current date
         let new_month_start_day = day_of_the_week(self.year, self.month, 1);
-        let mut day = (week * 7) + (7 + weekday - new_month_start_day) % 7 + 1;
+        let mut day = week.saturating_sub((weekday < new_month_start_day) as u32) * 7
+            + (7 + weekday - new_month_start_day) % 7
+            + 1;
 
         // Make sure the new day is within the bounds for the new month
         day -= (day.saturating_sub(self.days_in_month())).div_ceil(7) * 7;
@@ -102,11 +104,12 @@ impl CalendarDate {
     pub fn next_week(&self) -> Self {
         let mut date = *self;
         let days_in_month = self.days_in_month();
-        date.day += 7;
-        if date.day > days_in_month {
+        if date.day + 7 > days_in_month {
             let day_of_the_week = date.day_of_the_week();
             date = date.next_month();
             date.day = date.day_for_position(0, day_of_the_week)
+        } else {
+            date.day += 7;
         }
         date
     }
@@ -378,42 +381,40 @@ pub fn Calendar(props: CalendarProps) -> Element {
                         view_date.month = new_date.month;
                         (ctx.set_view_date)(view_date);
                     }
+                    tracing::info!("Setting focused date to {}", new_date);
                     ctx.focused_date.set(Some(new_date));
                 };
                 match e.key() {
                     Key::ArrowLeft => {
                         e.prevent_default();
-                        // Move to the last month instead of last week if we go off
-                        // the left edge of the calendar
-                        if focused_date.day_of_the_week() == 0 {
-                            let week = focused_date.week();
-                            let mut prev_month = focused_date.prev_month();
-                            prev_month.day = prev_month.day_for_position(week, 6);
-                            set_focused_date(prev_month);
-                        } else {
-                            set_focused_date(focused_date.prev_day());
-                        }
+                        set_focused_date(focused_date.prev_day());
                     }
                     Key::ArrowRight => {
                         e.prevent_default();
-                        // Move to the next month instead of next week if we go off
-                        // the right edge of the calendar
-                        if focused_date.day_of_the_week() == 6 {
-                            let week = focused_date.week();
-                            let mut next_month = focused_date.next_month();
-                            next_month.day = next_month.day_for_position(week, 0);
-                            set_focused_date(next_month);
-                        } else {
-                            set_focused_date(focused_date.next_day());
-                        }
+                        set_focused_date(focused_date.next_day());
                     }
                     Key::ArrowUp => {
                         e.prevent_default();
-                        set_focused_date(focused_date.prev_week());
+                        if e.modifiers().shift() {
+                            let day_of_the_week = focused_date.day_of_the_week();
+                            let mut prev_month = focused_date.prev_month();
+                            prev_month.day = prev_month.day_for_position((prev_month.days_in_month() + prev_month.month_start_day_of_the_week()) / 7, day_of_the_week);
+                            set_focused_date(prev_month);
+                        } else {
+                            // Otherwise, move to the previous week
+                            set_focused_date(focused_date.prev_week());
+                        }
                     }
                     Key::ArrowDown => {
                         e.prevent_default();
-                        set_focused_date(focused_date.next_week());
+                        if e.modifiers().shift() {
+                            let day_of_the_week = focused_date.day_of_the_week();
+                            let mut next_month = focused_date.next_month();
+                            next_month.day = next_month.day_for_position(0, day_of_the_week);
+                            set_focused_date(next_month);
+                        } else {
+                            set_focused_date(focused_date.next_week());
+                        }
                     }
                     _ => {}
                 }
